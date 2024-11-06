@@ -19,7 +19,7 @@ CXXFLAGS = -g
 all: ioc
 
 clean:
-	rm -rf $(OBJECTS)
+	rm -rf $(OBJECTS) ioc parser.cpp parser.hpp lexer.cpp
 
 ioc: $(OBJECTS)
 	$(CXX) $(LDFLAGS) $^ -o $@
