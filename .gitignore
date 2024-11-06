@@ -1,0 +1,5 @@
+*.o
+ioc
+parser.cpp
+parser.hpp
+lexer.cpp
