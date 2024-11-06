@@ -31,7 +31,6 @@ Quad::reg_t MemExpr::gen(QuadProgram& prog) {
         return prog.regFor(static_cast<VarDecl *>(_dec)->name());
 
     case Declaration::REG: {
-            // Read from memory address of the register
             auto ra = prog.newReg(); // Register to hold the address
             auto rd = prog.newReg(); // Register to hold the data
             prog.emit(Quad::seti(ra, static_cast<RegDecl *>(_dec)->address()));
@@ -117,61 +116,74 @@ Quad::reg_t BinopExpr::gen(QuadProgram& prog) {
 ///
 /// Génération d'une expression de champ de bits
 Quad::reg_t BitFieldExpr::gen(QuadProgram& prog) {
-    // Generate registers for the expression and boundaries
-    auto expr_reg = _expr->gen(prog);  // The register for the main expression
-    auto hi_reg = _hi->gen(prog);      // The high bit register
-    auto lo_reg = _lo->gen(prog);      // The low bit register
-
-    // Allocate a new register for the final result
+    // Generate registers for the main expression, hi, and lo.
+    auto expr_reg = _expr->gen(prog);
     auto result_reg = prog.newReg();
 
-    // Check if high and low bounds are constant
+    // Check if `hi` and `lo` values are constants to optimize calculations.
     auto hi_val_opt = _hi->eval();
     auto lo_val_opt = _lo->eval();
 
-    // If both hi and lo are constant, we can optimize the mask calculation
+    // Case 1: Both `hi` and `lo` are constants.
     if (hi_val_opt && lo_val_opt) {
         int hi_val = *hi_val_opt;
         int lo_val = *lo_val_opt;
 
+        // Ensure that `lo_val` is loaded into a register if needed.
+        auto lo_val_reg = prog.newReg();
+        prog.emit(Quad::seti(lo_val_reg, lo_val));
+
         if (hi_val == lo_val) {
-            // Special case: Extract a single bit
+            // Special case: Extract a single bit.
             auto shifted_reg = prog.newReg();
-            prog.emit(Quad::shr(shifted_reg, expr_reg, lo_reg));
+            prog.emit(Quad::shr(shifted_reg, expr_reg, lo_val_reg));
+
+            // Mask to isolate the single bit.
             auto mask_reg = prog.newReg();
             prog.emit(Quad::seti(mask_reg, 1));
+
+            // Apply the mask.
             prog.emit(Quad::and_(result_reg, shifted_reg, mask_reg));
         } else {
-            // General case: Extract multiple bits
-            int mask_val = (1 << (hi_val - lo_val + 1)) - 1;
-            auto shifted_reg = prog.newReg();
+            // General case: Extract multiple bits.
+            int num_bits = hi_val - lo_val + 1;
+            int mask_val = (1 << num_bits) - 1;
+
+            // Load mask value into a register.
             auto mask_reg = prog.newReg();
-
-            // Shift expression right by lo to bring target bits to the LSB
-            prog.emit(Quad::shr(shifted_reg, expr_reg, lo_reg));
-
-            // Apply the mask
             prog.emit(Quad::seti(mask_reg, mask_val));
+
+            // Shift expression right by `lo` to bring target bits to the LSB.
+            auto shifted_reg = prog.newReg();
+            prog.emit(Quad::shr(shifted_reg, expr_reg, lo_val_reg));
+
+            // Apply the mask to isolate desired bits.
             prog.emit(Quad::and_(result_reg, shifted_reg, mask_reg));
         }
-    } else {
-        // General case: hi or lo is not constant
-        auto mask_reg = prog.newReg();
+    }
+    // Case 2: Either `hi` or `lo` is not constant (dynamic bitfield).
+    else {
+        // Generate registers for `hi` and `lo`.
+        auto hi_reg = _hi->gen(prog);
+        auto lo_reg = _lo->gen(prog);
 
-        // Compute the mask based on (1 << (hi - lo + 1)) - 1
+        // Compute the number of bits to extract: `n = hi - lo + 1`.
         auto diff_reg = prog.newReg();
-        prog.emit(Quad::sub(diff_reg, hi_reg, lo_reg));
         auto one_reg = prog.newReg();
         prog.emit(Quad::seti(one_reg, 1));
-        prog.emit(Quad::add(diff_reg, diff_reg, one_reg));  // hi - lo + 1
-        prog.emit(Quad::shl(mask_reg, one_reg, diff_reg));
-        prog.emit(Quad::sub(mask_reg, mask_reg, one_reg));  // Mask value
+        prog.emit(Quad::sub(diff_reg, hi_reg, lo_reg));
+        prog.emit(Quad::add(diff_reg, diff_reg, one_reg));  // n = hi - lo + 1.
 
-        // Shift expression by lo
+        // Create the mask dynamically: `(1 << n) - 1`.
+        auto mask_reg = prog.newReg();
+        prog.emit(Quad::shl(mask_reg, one_reg, diff_reg));  // 1 << n.
+        prog.emit(Quad::sub(mask_reg, mask_reg, one_reg));  // (1 << n) - 1.
+
+        // Shift the expression to the right by `lo`.
         auto shifted_reg = prog.newReg();
         prog.emit(Quad::shr(shifted_reg, expr_reg, lo_reg));
 
-        // Apply mask to the shifted expression
+        // Apply mask to isolate the bitfield.
         prog.emit(Quad::and_(result_reg, shifted_reg, mask_reg));
     }
 
@@ -277,117 +289,106 @@ void SetStatement::gen(AutoDecl& automaton, QuadProgram& prog) const {
 void SetFieldStatement::gen(AutoDecl& automaton, QuadProgram& prog) const {
     prog.comment(pos);
 
-    // Generate registers for high, low, and value expressions
+    // Generate registers for hi, lo, and expr
     auto hi_reg = _hi->gen(prog);
     auto lo_reg = _lo->gen(prog);
     auto value_reg = _expr->gen(prog);
 
-    // Declare a register to hold the variable or register value of E
+    // Declare a register for E (the variable being assigned to)
     Quad::reg_t e_reg;
     Quad::reg_t addr_reg;
 
-    // Initialize e_reg based on whether _dec is a variable or register
-    switch (_dec->type()) {
-        case Declaration::VAR:
-            e_reg = prog.regFor(static_cast<VarDecl *>(_dec)->name());
-            break;
-
-        case Declaration::REG:
-            addr_reg = prog.newReg();
-            prog.emit(Quad::seti(addr_reg, static_cast<RegDecl *>(_dec)->address()));
-            e_reg = prog.newReg();
-            prog.emit(Quad::load(e_reg, addr_reg));
-            break;
-
-        default:
-            assert(false); // Shouldn’t happen
-            return;
+    // Load E into e_reg based on its declaration type
+    if (_dec->type() == Declaration::VAR) {
+        e_reg = prog.regFor(static_cast<VarDecl*>(_dec)->name());
+    } else if (_dec->type() == Declaration::REG) {
+        addr_reg = prog.newReg();
+        prog.emit(Quad::seti(addr_reg, static_cast<RegDecl*>(_dec)->address()));
+        e_reg = prog.newReg();
+        prog.emit(Quad::load(e_reg, addr_reg));
+    } else {
+        assert(false && "Unsupported declaration type in SetFieldStatement::gen()");
+        return;
     }
 
-    // Try to evaluate high, low, and value if they are constants
+    // Check if hi, lo, and value are constants
     auto hi_val_opt = _hi->eval();
     auto lo_val_opt = _lo->eval();
     auto value_val_opt = _expr->eval();
 
-    if (hi_val_opt && lo_val_opt && value_val_opt) {
-        // If hi, lo, and value are constants
-        int hi_val = hi_val_opt.value();
-        int lo_val = lo_val_opt.value();
-        int value_val = value_val_opt.value();
-
-        if (hi_val == lo_val) {
-            // If we're setting a single bit
-            int bit_pos = lo_val;
-            auto bit_mask = prog.newReg();
-
-            if (value_val == 1) {
-                // bit_mask = 1 << bit_pos
-                prog.emit(Quad::seti(bit_mask, 1));
-                auto shift_reg = prog.newReg();
-                prog.emit(Quad::seti(shift_reg, bit_pos));
-                prog.emit(Quad::shl(bit_mask, bit_mask, shift_reg));
-
-                // E = E | bit_mask
-                prog.emit(Quad::or_(e_reg, e_reg, bit_mask));
-            } else if (value_val == 0) {
-                // bit_mask = ~(1 << bit_pos)
-                prog.emit(Quad::seti(bit_mask, 1));
-                auto shift_reg = prog.newReg();
-                prog.emit(Quad::seti(shift_reg, bit_pos));
-                prog.emit(Quad::shl(bit_mask, bit_mask, shift_reg));
-                prog.emit(Quad::inv(bit_mask, bit_mask));
-
-                // E = E & bit_mask
-                prog.emit(Quad::and_(e_reg, e_reg, bit_mask));
-            }
-        } else {
-            // Multi-bit field: mask = ((1 << (hi - lo + 1)) - 1) << lo
-            int num_bits = hi_val - lo_val + 1;
-            auto bit_mask = prog.newReg();
-            prog.emit(Quad::seti(bit_mask, (1 << num_bits) - 1));
-            auto shift_reg = prog.newReg();
-            prog.emit(Quad::seti(shift_reg, lo_val));
-            prog.emit(Quad::shl(bit_mask, bit_mask, shift_reg));
-
-            // Clear the bitfield area in e_reg
-            auto inv_mask = prog.newReg();
-            prog.emit(Quad::inv(inv_mask, bit_mask));
-            prog.emit(Quad::and_(e_reg, e_reg, inv_mask));
-
-            // Align value and set the bitfield in e_reg
-            auto aligned_value = prog.newReg();
-            prog.emit(Quad::seti(aligned_value, (1 << num_bits) - 1));
-            prog.emit(Quad::and_(aligned_value, value_reg, aligned_value));
-            prog.emit(Quad::shl(aligned_value, aligned_value, shift_reg));
-            prog.emit(Quad::or_(e_reg, e_reg, aligned_value));
-        }
-    } else {
-        // General case for dynamic hi/lo or value
-        auto num_bits = prog.newReg();
-        prog.emit(Quad::sub(num_bits, hi_reg, lo_reg));
-        auto one_reg = prog.newReg();
-        prog.emit(Quad::seti(one_reg, 1));
-        prog.emit(Quad::add(num_bits, num_bits, one_reg));
-
-        // Construct the bit mask dynamically: ((1 << num_bits) - 1) << lo
-        auto bit_mask = prog.newReg();
-        prog.emit(Quad::shl(bit_mask, one_reg, num_bits));
-        prog.emit(Quad::sub(bit_mask, bit_mask, one_reg));
-        prog.emit(Quad::shl(bit_mask, bit_mask, lo_reg));
-
-        // Clear the target bitfield in e_reg
-        auto inv_mask = prog.newReg();
-        prog.emit(Quad::inv(inv_mask, bit_mask));
-        prog.emit(Quad::and_(e_reg, e_reg, inv_mask));
-
-        // Align value and set the bitfield in e_reg
-        auto aligned_value = prog.newReg();
-        prog.emit(Quad::and_(aligned_value, value_reg, bit_mask));
-        prog.emit(Quad::shl(aligned_value, aligned_value, lo_reg));
-        prog.emit(Quad::or_(e_reg, e_reg, aligned_value));
+    // Ensure we don't overwrite e_reg if value_reg refers to e_reg
+    if (e_reg == value_reg) {
+        auto temp_value_reg = prog.newReg();
+        prog.emit(Quad::set(temp_value_reg, value_reg));
+        value_reg = temp_value_reg;
     }
 
-    // If e_reg represents a memory-mapped register, store back the updated value
+    if (hi_val_opt && lo_val_opt && value_val_opt) {
+        // Constants case
+        int hi_val = *hi_val_opt;
+        int lo_val = *lo_val_opt;
+        int value_val = *value_val_opt;
+
+        int num_bits = hi_val - lo_val + 1;
+        int mask_val = ((1 << num_bits) - 1) << lo_val;
+
+        // Load mask into a register
+        auto mask_reg = prog.newReg();
+        prog.emit(Quad::seti(mask_reg, mask_val));
+
+        // Clear the target bits in e_reg
+        auto inv_mask_reg = prog.newReg();
+        prog.emit(Quad::inv(inv_mask_reg, mask_reg));
+        prog.emit(Quad::and_(e_reg, e_reg, inv_mask_reg));
+
+        // Prepare the value to set
+        int value_mask = (1 << num_bits) - 1;
+        int aligned_value = (value_val & value_mask) << lo_val;
+
+        // Load the aligned value into a register
+        auto aligned_value_reg = prog.newReg();
+        prog.emit(Quad::seti(aligned_value_reg, aligned_value));
+
+        // Set the new bits in e_reg
+        prog.emit(Quad::or_(e_reg, e_reg, aligned_value_reg));
+    } else {
+        // Dynamic case
+
+        // Compute n = hi - lo + 1
+        auto one_reg = prog.newReg();
+        prog.emit(Quad::seti(one_reg, 1));
+
+        auto n_reg = prog.newReg();
+        prog.emit(Quad::sub(n_reg, hi_reg, lo_reg));
+        prog.emit(Quad::add(n_reg, n_reg, one_reg)); // n = hi - lo + 1
+
+        // Compute mask = ((1 << n) - 1) << lo
+        auto temp_reg = prog.newReg();
+        prog.emit(Quad::shl(temp_reg, one_reg, n_reg)); // temp_reg = 1 << n
+
+        auto mask_reg = prog.newReg();
+        prog.emit(Quad::sub(mask_reg, temp_reg, one_reg)); // mask_reg = (1 << n) - 1
+
+        prog.emit(Quad::shl(mask_reg, mask_reg, lo_reg)); // mask_reg <<= lo
+
+        // Clear the target bits in e_reg
+        auto inv_mask_reg = prog.newReg();
+        prog.emit(Quad::inv(inv_mask_reg, mask_reg));
+        prog.emit(Quad::and_(e_reg, e_reg, inv_mask_reg));
+
+        // Prepare the value to set
+        auto value_mask_reg = prog.newReg();
+        prog.emit(Quad::sub(value_mask_reg, temp_reg, one_reg)); // value_mask_reg = (1 << n) - 1
+
+        auto aligned_value_reg = prog.newReg();
+        prog.emit(Quad::and_(aligned_value_reg, value_reg, value_mask_reg)); // Mask value_reg
+        prog.emit(Quad::shl(aligned_value_reg, aligned_value_reg, lo_reg)); // Align value
+
+        // Set the new bits in e_reg
+        prog.emit(Quad::or_(e_reg, e_reg, aligned_value_reg));
+    }
+
+    // If e_reg represents a memory-mapped register, store it back to memory
     if (_dec->type() == Declaration::REG) {
         prog.emit(Quad::store(addr_reg, e_reg));
     }
@@ -449,7 +450,6 @@ void When::gen(AutoDecl& automaton, QuadProgram& prog) {
     // Step 5: Insert label to skip action if condition was not met
     prog.emit(Quad::lab(skip_label));
 }
-
 
 ///
 /// Génération d'un état de l'automate
