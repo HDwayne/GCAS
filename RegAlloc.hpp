@@ -36,12 +36,12 @@ private:
 	void load(Quad::reg_t reg);
 	bool isVar(Quad::reg_t reg) const;
 
-	map<Quad::reg_t, Quad::reg_t> _map;
-	list<Quad::reg_t> _written;
-	list<Quad::reg_t> _avail;
-	StackMapper& _mapper;
-	list<Inst>& _insts;
-	list<Quad::reg_t> _fried;
+	map<Quad::reg_t, Quad::reg_t> _map; // reg (virt) -> reg (phys) => mapping
+	list<Quad::reg_t> _written; // reg (virt) written in the BB
+	list<Quad::reg_t> _avail; // reg (phys) available for allocation
+	StackMapper& _mapper; // reg -> offset in stack mapping (stack) 
+	list<Inst>& _insts; // instructions to add the generated code to 
+	list<Quad::reg_t> _fried; // reg (phys) to free
 };
 
 #endif	// IOC_REGALLOC_HPP

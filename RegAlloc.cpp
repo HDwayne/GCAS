@@ -2,6 +2,7 @@
 #include <vector>
 using namespace std;
 #include "RegAlloc.hpp"
+#include <algorithm>
 
 /**
  * @class StackMapper
@@ -97,16 +98,32 @@ RegAlloc::RegAlloc(StackMapper& mapper, list<Inst>& insts)
  * @param inst		Instruction sto process.
  */
 void RegAlloc::process(Inst inst) {
+    for (int i = 0; i < Inst::param_num; ++i) {
+        Param& param = inst[i];
 
-	// add the fixed instruction
-	_insts.push_back(inst);
-	_fried.clear();
+        if (param.type() == Param::READ) {
+            processRead(param);
+        } else if (param.type() == Param::WRITE) {
+            processWrite(param);
+        }
+    }
+
+    _insts.push_back(inst);
+
+    for (const auto& reg : _fried) {
+        free(reg);
+    }
+    _fried.clear();
 }
+
 
 /**
  * Complete the allocation of a BB by generating store of modified global variables.
  */
 void RegAlloc::complete() {
+    for (const auto& virt_reg : _written) {
+        store(virt_reg);
+    }
 }
 
 /**
@@ -114,25 +131,70 @@ void RegAlloc::complete() {
  * @param param		Parameter to fix.
  */
 void RegAlloc::processRead(Param& param) {
-	assert("parameter should be a read parameter!" && param.type() == Param::READ);
+    assert("parameter should be a read parameter!" && param.type() == Param::READ);
+
+    Quad::reg_t virt_reg = param.value();
+    Quad::reg_t phys_reg = allocate(virt_reg);
+
+    if (isVar(virt_reg) && _map.find(virt_reg) == _map.end()) { // not already loaded
+        load(virt_reg);
+    }
+
+    param = Param::read(phys_reg);
 }
+
 
 /**
  * Allocata write register.
  * @param param		Parameter to fix.
  */
 void RegAlloc::processWrite(Param& param) {
+    assert("parameter should be a write parameter!" && param.type() == Param::WRITE);
+
+    Quad::reg_t virt_reg = param.value();
+    Quad::reg_t phys_reg = allocate(virt_reg);
+
+    if (isVar(virt_reg)) {
+        bool found = false;
+        for (const auto& written_reg : _written) {
+            if (written_reg == virt_reg) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            _written.push_back(virt_reg);
+    }
+
+    param = Param::write(phys_reg);
 }
+
+
 
 /**
  * Allocate an hardware register through the free ones or spill a register
  * to get a new free hardware register.
  */
 Quad::reg_t RegAlloc::allocate(Quad::reg_t reg) {
-	Quad::reg_t r;
+    if (_map.find(reg) != _map.end()) {
+        return _map[reg];
+    }
 
+    if (!_avail.empty()) {
+        Quad::reg_t phys_reg = _avail.front();
+        _avail.pop_front();
+        _map[reg] = phys_reg;
+        return phys_reg;
+    }
 
-	return r;
+    Quad::reg_t to_spill = _map.begin()->first;
+    spill(to_spill);
+
+    Quad::reg_t phys_reg = _map[to_spill];
+    _map.erase(to_spill);
+    _map[reg] = phys_reg;
+
+    return phys_reg;
 }
 
 /**
@@ -150,6 +212,12 @@ void RegAlloc::spill(Quad::reg_t reg) {
  * @param reg	Virtual register to free.
  */
 void RegAlloc::free(Quad::reg_t reg) {
+    auto vr = _map.find(reg);
+    if (vr != _map.end()) {
+        Quad::reg_t phys_reg = vr->second;
+        _avail.push_front(phys_reg);
+        _map.erase(vr);
+    }
 }
 
 /**

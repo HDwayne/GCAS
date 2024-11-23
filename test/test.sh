@@ -28,12 +28,13 @@ for file in "$test_dir"/*.io; do
 
     # Write the filename to the output file
     echo "Filename: $filename" >> "$output"
-
-    # Run the ioc compiler with the desired options and append the output
-    ./ioc -print-quads -stop-after-print "$file" >> "$output" 2>&1
+    echo "\n\t-----> select <-----\n" >> "$output"
+    ./ioc -print-select -stop-after-print "$file" >> "$output" 2>&1
+    echo "\n\t-----> alloc <-----\n" >> "$output"
+    ./ioc -print-alloc -stop-after-print "$file" >> "$output" 2>&1
 
     # Add a separator between files
-    echo -e "\n---\n" >> "$output"
+    echo "\n-----------------------------------------------\n" >> "$output"
 done
 
 echo "All test results have been saved to $output."
